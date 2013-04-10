@@ -1,7 +1,9 @@
 package com.github.rmannibucau.hazelcast.daemon;
 
+import com.github.rmannibucau.hazelcast.daemon.command.HazelcastMembers;
 import com.github.rmannibucau.hazelcast.daemon.command.HazelcastNodeStart;
 import com.github.rmannibucau.hazelcast.daemon.command.HazelcastNodeStop;
+import com.github.rmannibucau.hazelcast.daemon.command.HazelcastStatus;
 import io.airlift.command.Cli;
 import io.airlift.command.Help;
 import io.airlift.command.ParseException;
@@ -11,10 +13,12 @@ import java.util.Collections;
 
 public class HazelcastNodeRunner {
     public static void main(final String[] args) {
-        Cli<Runnable> cli = Cli.buildCli("hazelcast-daemon", Runnable.class)
+        final Cli<Runnable> cli = Cli.buildCli("hazelcast-daemon", Runnable.class)
                 .withDescription("A simple hazelcast start/stop program")
                 .withCommand(HazelcastNodeStart.class)
                 .withCommand(HazelcastNodeStop.class)
+                .withCommand(HazelcastStatus.class)
+                .withCommand(HazelcastMembers.class)
                 .build();
 
         try {
