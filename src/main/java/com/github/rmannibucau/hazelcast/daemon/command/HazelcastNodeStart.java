@@ -9,20 +9,44 @@ import com.hazelcast.core.HazelcastInstance;
 import com.hazelcast.core.Member;
 import io.airlift.command.Command;
 import io.airlift.command.Option;
+import org.w3c.dom.Document;
+import org.w3c.dom.Node;
+import org.w3c.dom.NodeList;
 
+import javax.xml.parsers.DocumentBuilder;
+import javax.xml.parsers.DocumentBuilderFactory;
+import javax.xml.transform.OutputKeys;
+import javax.xml.transform.Transformer;
+import javax.xml.transform.TransformerFactory;
+import javax.xml.transform.dom.DOMSource;
+import javax.xml.transform.stream.StreamResult;
+import java.io.BufferedReader;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.io.StringReader;
+import java.io.StringWriter;
+import java.lang.management.ClassLoadingMXBean;
+import java.lang.management.CompilationMXBean;
 import java.lang.management.ManagementFactory;
+import java.lang.management.MemoryMXBean;
+import java.lang.management.OperatingSystemMXBean;
 import java.lang.management.RuntimeMXBean;
+import java.lang.management.ThreadMXBean;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.net.URL;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.Random;
 import java.util.Set;
 
@@ -30,14 +54,76 @@ import java.util.Set;
 public class HazelcastNodeStart extends AdminRemoteCommand implements Runnable {
     private static final String STATUS_FORMAT = "| %1$-36s | %2$-30s | %3$-15s | %4$-11s | %5$-12s |";
     private static final char LN = '\n';
+    private static final String[][] JAVA_CTRL_CHARS_ESCAPE = {
+            {"\b", "\\b"},
+            {"\n", "\\n"},
+            {"\t", "\\t"},
+            {"\f", "\\f"},
+            {"\r", "\\r"}
+    };
 
-    @Option(title = "configuration", name = { "--configuration", "-c" }, description = "the path to the hazelcast xml configuration")
+    @Option(title = "configuration", name = {"--configuration", "-c"}, description = "the path to the hazelcast xml configuration")
     private String configuration;
 
-    @Option(title = "instance name", name = { "--name", "-n" }, description = "the hazelcast instance name")
+    @Option(title = "instance name", name = {"--name", "-n"}, description = "the hazelcast instance name")
     private String instance;
 
     private HazelcastInstance hazelcastInstance;
+
+    private static void appendProps(final StringBuilder builder, final Class<?> clazz, final Object instance) {
+        final Map<String, String> props = new HashMap<String, String>();
+        findInfo(clazz, instance, props);
+        final List<String> sortedKeys = new ArrayList<String>(props.keySet());
+        Collections.sort(sortedKeys);
+        for (final String key : sortedKeys) {
+            appendProperty(builder, key, props.get(key));
+        }
+    }
+
+    private static void findInfo(final Class<?> clazz, final Object instance, final Map<String, String> out) {
+        for (final Method m : clazz.getMethods()) {
+            final String name = m.getName();
+            if (Modifier.isPublic(m.getModifiers()) && m.getParameterTypes().length == 0
+                    && (name.startsWith("get") || name.startsWith("is"))
+                    // exclusions for runtime mx bean
+                    && !"getSystemProperties".equals(name) && !name.endsWith("Path") && !"getInputArguments".equals(name)) {
+                final String key;
+                if (name.startsWith("get")) {
+                    key = name.substring("get".length());
+                } else {
+                    key = name.substring("is".length());
+                }
+
+                try {
+                    out.put(key, m.invoke(instance).toString());
+                } catch (final Exception e) {
+                    // no-op
+                }
+            }
+        }
+    }
+
+    private static void appendProperty(final StringBuilder builder, final String key, final String value) {
+        builder.append(key).append(" = ").append(escape(value)).append(LN);
+    }
+
+    private static String escape(final String value) {
+        if (value == null) {
+            return value;
+        }
+
+        String escaped = value;
+        for (final String[] item : JAVA_CTRL_CHARS_ESCAPE) {
+            escaped = escaped.replace(item[0], item[1]);
+        }
+        return escaped;
+    }
+
+    private static void write(final Socket socket, final String text) throws IOException {
+        final OutputStream outputStream = socket.getOutputStream();
+        outputStream.write((text + LN).getBytes());
+        outputStream.flush();
+    }
 
     @Override
     public void run() {
@@ -91,7 +177,7 @@ public class HazelcastNodeStart extends AdminRemoteCommand implements Runnable {
                                 ch = -1;
                             }
 
-                            if (ch < 32)  {
+                            if (ch < 32) {
                                 break;
                             }
                             sentCmd.append((char) ch);
@@ -109,8 +195,10 @@ public class HazelcastNodeStart extends AdminRemoteCommand implements Runnable {
                             write(socket, status());
                         } else if ("members".equals(cmd)) {
                             write(socket, members());
+                        } else if ("jvm".equals(cmd)) {
+                            write(socket, jvm());
                         } else {
-                            System.err.println("Command " + cmd + " received.");
+                            System.err.println("Invalid command '" + escape(cmd) + "' received.");
                         }
                     } finally {
                         try {
@@ -149,43 +237,119 @@ public class HazelcastNodeStart extends AdminRemoteCommand implements Runnable {
             return "No instance available";
         }
 
+        final StringBuilder builder = new StringBuilder();
+        builder.append("----- Hazelcast Information -----").append(LN);
+        builder.append("Instance: ").append(hazelcastInstance.getName()).append(LN);
+        builder.append("#Members: ").append(hazelcastInstance.getCluster().getMembers().size()).append(LN);
+        builder.append("Configuration url: ").append(hazelcastInstance.getConfig().getConfigurationUrl()).append(LN);
+        builder.append("Configuration:").append(LN).append(slurpAndFormat(hazelcastInstance.getConfig().getConfigurationUrl(), "    %2d. ")).append(LN);
+        return builder.toString();
+    }
+
+    private String slurpAndFormat(final URL configurationUrl, final String prefix) {
+        final DocumentBuilderFactory dbf = DocumentBuilderFactory.newInstance();
+        dbf.setValidating(false);
+
+        InputStream is = null;
+        try {
+            is = configurationUrl.openStream();
+            final DocumentBuilder db = dbf.newDocumentBuilder();
+            final Document doc = db.parse(is);
+            removeComments(doc);
+
+            // format
+            String xml;
+            try {
+                final StreamResult xmlOutput = new StreamResult(new StringWriter());
+                final TransformerFactory transformerFactory = TransformerFactory.newInstance();
+                try { // old versions
+                    transformerFactory.setAttribute("indent-number", 2);
+                } catch (final IllegalArgumentException e) {
+                    // no-op
+                }
+
+                final Transformer transformer = transformerFactory.newTransformer();
+                transformer.setOutputProperty(OutputKeys.OMIT_XML_DECLARATION, "yes");
+                transformer.setOutputProperty(OutputKeys.ENCODING, "UTF-8");
+                transformer.setOutputProperty(OutputKeys.INDENT, "yes");
+                try { // new versions
+                    transformer.setOutputProperty("{http://xml.apache.org/xslt}indent-amount", Integer.toString(2));
+                } catch (final IllegalArgumentException e) {
+                    // no-op
+                }
+                transformer.transform(new DOMSource(doc), xmlOutput);
+                xml = xmlOutput.getWriter().toString();
+            } catch (final Exception e) {
+                return doc.toString();
+            }
+
+            final StringBuilder prefixed = new StringBuilder();
+            final BufferedReader reader = new BufferedReader(new StringReader(xml));
+
+            int lineNumber = 1;
+            String line;
+            while ((line = reader.readLine()) != null) {
+                prefixed.append(String.format(prefix, lineNumber++)).append(line).append(LN);
+            }
+            return prefixed.toString();
+        } catch (final Exception e) {
+            return "!!!Can't read the configuration!!!";
+        } finally {
+            if (is != null) {
+                try {
+                    is.close();
+                } catch (final IOException e) {
+                    // no-op
+                }
+            }
+        }
+    }
+
+    private String jvm() throws IOException {
+        if (hazelcastInstance == null) {
+            return "No instance available";
+        }
+
         final Runtime runtime = Runtime.getRuntime();
         final long maxMemory = runtime.maxMemory();
         final long totalMemory = runtime.totalMemory();
         final long freeMemory = runtime.freeMemory();
-
         final int cpu = runtime.availableProcessors();
-        final RuntimeMXBean runtimeMXBean = ManagementFactory.getRuntimeMXBean();
 
         final StringBuilder builder = new StringBuilder();
-        builder.append("----- Hazelcast Properties -----").append(LN);
-        builder.append("Instance: ").append(hazelcastInstance.getName()).append(LN);
-        builder.append("#Members: ").append(hazelcastInstance.getCluster().getMembers().size()).append(LN);
-        builder.append("Configuration url: ").append(hazelcastInstance.getConfig().getConfigurationUrl()).append(LN);
-        builder.append("Configuration: ").append(hazelcastInstance.getConfig()).append(LN);
-        // TODO: dump config
-        builder.append("----- Machine Properties -----").append(LN);
+
+        builder.append("----- Quick Summary -----").append(LN);
         builder.append("Free memory: ").append(freeMemory / 1024).append(LN);
         builder.append("Total memory: ").append(totalMemory / 1024).append(LN);
         builder.append("Max memory: ").append(maxMemory / 1024).append(LN);
         builder.append("Total free memory: ").append((freeMemory + (maxMemory - totalMemory)) / 1024).append(LN);
         builder.append("#CPU: ").append(cpu).append(LN);
-        builder.append("----- System Properties -----").append(LN);
-        for (final String key : System.getProperties().stringPropertyNames()) {
-            builder.append(key).append(" = ").append(System.getProperty(key)).append(LN);
-        }
+
         builder.append("----- Runtime Properties -----").append(LN);
-        for (final Method m : RuntimeMXBean.class.getMethods()) {
-            final String name = m.getName();
-            if (Modifier.isPublic(m.getModifiers()) && name.startsWith("get") && m.getParameterTypes().length == 0
-                    && !"getSystemProperties".equals(name) && !name.endsWith("Path") && !"getInputArguments".equals(name)) {
-                try {
-                    builder.append(name.substring("get".length())).append(" = ").append(m.invoke(runtimeMXBean)).append(LN);
-                } catch (final Exception e) {
-                    // no-op
-                }
-            }
+        appendProps(builder, RuntimeMXBean.class, ManagementFactory.getRuntimeMXBean());
+
+        builder.append("----- Thread Properties -----").append(LN);
+        appendProps(builder, ThreadMXBean.class, ManagementFactory.getThreadMXBean());
+
+        builder.append("----- Memory Properties -----").append(LN);
+        appendProps(builder, MemoryMXBean.class, ManagementFactory.getMemoryMXBean());
+
+        builder.append("----- ClassLoading Properties -----").append(LN);
+        appendProps(builder, ClassLoadingMXBean.class, ManagementFactory.getClassLoadingMXBean());
+
+        builder.append("----- OperatingSystem Properties -----").append(LN);
+        appendProps(builder, OperatingSystemMXBean.class, ManagementFactory.getOperatingSystemMXBean());
+
+        builder.append("----- Compilation Properties -----").append(LN);
+        appendProps(builder, CompilationMXBean.class, ManagementFactory.getCompilationMXBean());
+
+        builder.append("----- System Properties -----").append(LN);
+        final List<String> systPropKeys = new ArrayList<String>(System.getProperties().stringPropertyNames());
+        Collections.sort(systPropKeys); // easier to search then
+        for (final String key : systPropKeys) {
+            appendProperty(builder, key, System.getProperty(key));
         }
+
         return builder.toString();
     }
 
@@ -212,10 +376,35 @@ public class HazelcastNodeStart extends AdminRemoteCommand implements Runnable {
         return builder.toString();
     }
 
-    private static void write(final Socket socket, final String text) throws IOException {
-        final OutputStream outputStream = socket.getOutputStream();
-        outputStream.write((text + LN).getBytes());
-        outputStream.flush();
+    private static boolean removeComments(final Node node) {
+        if (node.getNodeType() == Node.COMMENT_NODE) {
+            removeChildren(node);
+            node.getParentNode().removeChild(node);
+            return true;
+        } else {
+            final NodeList list = node.getChildNodes();
+
+            boolean removed = false;
+            int idx = 0;
+            while (node.getChildNodes().getLength() > idx) {
+                if (!removeComments(list.item(idx))) {
+                    idx++;
+                } else {
+                    removed = true;
+                }
+            }
+            return removed;
+        }
+    }
+
+    private static void removeChildren(final Node node) { // avoid blank lines
+        while (node.hasChildNodes()) {
+            node.removeChild(node.getFirstChild());
+        }
+        final Node sibling = node.getNextSibling();
+        if (sibling != null && sibling.getNodeType() == Node.TEXT_NODE && sibling.getNodeValue().trim().isEmpty()) {
+            node.getParentNode().removeChild(sibling);
+        }
     }
 
     private static class ShutdownThread extends Thread {

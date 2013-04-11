@@ -1,5 +1,6 @@
 package com.github.rmannibucau.hazelcast.daemon;
 
+import com.github.rmannibucau.hazelcast.daemon.command.HazelcastJVM;
 import com.github.rmannibucau.hazelcast.daemon.command.HazelcastMembers;
 import com.github.rmannibucau.hazelcast.daemon.command.HazelcastNodeStart;
 import com.github.rmannibucau.hazelcast.daemon.command.HazelcastNodeStop;
@@ -19,6 +20,7 @@ public class HazelcastNodeRunner {
                 .withCommand(HazelcastNodeStop.class)
                 .withCommand(HazelcastStatus.class)
                 .withCommand(HazelcastMembers.class)
+                .withCommand(HazelcastJVM.class)
                 .build();
 
         try {
