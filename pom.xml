@@ -10,7 +10,7 @@
 
   <groupId>com.github.rmannibucau</groupId>
   <artifactId>hazelcast-daemon</artifactId>
-  <version>0.2-SNAPSHOT</version>
+  <version>0.2</version>
   
   <dependencies>
     <dependency>
