@@ -83,9 +83,6 @@ Or you can use the -jar-with-dependencies uber jar of hazelcast-daemon (note: it
 
 In the following help snippet X can be [jvm, members, status].
 
-    NAME
-            hazelcast-daemon X - Summary of the JVM
-
     SYNOPSIS
             hazelcast-daemon X [(--host <admin host> | -h <admin host>)]
                     [(--port <admin port> | -p <admin port>)]
